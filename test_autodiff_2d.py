@@ -265,7 +265,7 @@ def plot():
 
     plt.xlabel("DOF")
     plt.ylabel("L2 Loss")
-    plt.title("L2 Loss vs DOF for Poisson Equation on Sphere")
+    plt.title("L2 Loss vs DOF for Poisson Equation in 2D")
     plt.legend()
     plt.savefig("convergence.png")
 
