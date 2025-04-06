@@ -12,55 +12,60 @@ import pyvista as pv
 import sys
 import os
 
-def zero_integral_function(M, g):
-    """
-    Constructs a function on mesh vertices that integrates to zero.
-    
-    Parameters:
-    M (ndarray): The mass matrix (NxN).
-    g (ndarray): initial function values on vertices (Nx1).
-    
-    Returns:
-    ndarray: Function values f with integral zero.
-    """
-    # Extract the diagonal of the mass matrix (lumped mass approximation)
-    M = M.todense()
-    M_diag = np.diag(M)
-    
-    # Compute the mass-weighted mean
-    mean_g = np.sum(M_diag * g) / np.sum(M_diag)
-    
-    # Subtract the mean to ensure zero integral
-    f = g - mean_g
-    
-    return f
+def get_spherical_coordinates(v, c):
+    r = np.linalg.norm(v - c, ord=2, axis=1)
+    theta = np.arccos((v[:, 2] - c[2]) / r)
+    phi = np.sign(v[:, 1] - c[1]) * np.arccos((v[:, 0] - c[0]) / np.sqrt((v[:, 0] - c[0])**2 + (v[:, 1] - c[1])**2))
 
-def f(x, y, z):
+    return np.stack([r, theta, phi], axis=1)
+
+def get_spherical_coordinates_torch(v, c):
+    r = torch.linalg.norm(v - c, ord=2, dim=1)
+    theta = torch.arccos((v[:, 2] - c[2]) / r)
+    phi = torch.sign(v[:, 1] - c[1]) * torch.arccos((v[:, 0] - c[0]) / torch.sqrt((v[:, 0] - c[0])**2 + (v[:, 1] - c[1])**2))
+
+    return torch.stack([r, theta, phi], dim=1)
+
+def f(v, const = 0.0):
+    c = np.mean(v, axis=0)
+    coords = get_spherical_coordinates(v, c)
+    r, theta, phi = coords[:, 0], coords[:, 1], coords[:, 2]
+
     if sys.argv[2] == "1":
-        return np.sin(x) + np.cos(y)
-    elif sys.argv[2] == "2":
-        return 2*x**2 + y**3 + 4*z**2
+        f = r**2 * (const - 0.5*np.cos(theta))
     else:
-        print("Usage: python test_autodiff_sphere.py [train|plot] [1|2]")
+        print("Usage: python test_autodiff_sphere.py [train|plot] 1")
         exit()
 
-# Create a MLP model
-class MLP(torch.nn.Module):
-    def __init__(self, n=128, n_layers=5, out_dim=3):
-        super(MLP, self).__init__()
-        net = []
-        net.append(torch.nn.Linear(3, n))
-        net.append(torch.nn.Sigmoid())
-        for _ in range(n_layers):
-            net.append(torch.nn.Linear(n, n))
-            net.append(torch.nn.Sigmoid())
-        net.append(torch.nn.Linear(n, out_dim))
+    return f
 
-        self.layers = torch.nn.Sequential(*net)
-    
-    def forward(self, x):
-        return self.layers(x)
-    
+def f_torch(v, const = 0.0):
+    c = torch.mean(v, dim=0)
+    coords = get_spherical_coordinates_torch(v, c)
+    r, theta, phi = coords[:, 0], coords[:, 1], coords[:, 2]
+
+    if sys.argv[2] == "1":
+        f = r**2 * (const - 0.5*torch.cos(theta))
+    else:
+        print("Usage: python test_autodiff_sphere.py [train|plot] 1")
+        exit()
+
+    return f
+
+def laplacian_f(v):
+    c = torch.mean(v, dim=0)
+    coords = get_spherical_coordinates_torch(v, c)
+    r, theta, phi = coords[:, 0], coords[:, 1], coords[:, 2]
+
+    if sys.argv[2] == "1":
+        lap_f = torch.cos(theta)
+    else:
+        print("Usage: python test_autodiff_sphere.py [train|plot] 1")
+        exit()
+
+    return lap_f
+
+# Create a MLP model
 class Sine(torch.nn.Module):
     def __init__(self, w0 = 1.):
         super().__init__()
@@ -68,9 +73,9 @@ class Sine(torch.nn.Module):
     def forward(self, x):
         return torch.sin(self.w0 * x)
     
-class MLP2(torch.nn.Module):
+class MLP(torch.nn.Module):
     def __init__(self, n=512, n_layers=3, in_dim=3):
-        super(MLP2, self).__init__()
+        super(MLP, self).__init__()
         net = []
         net.append(torch.nn.Linear(in_dim, n))
         net.append(Sine())
@@ -122,49 +127,67 @@ def get_interpolated_values(f, v, v_mesh, f_mesh):
 
     return f_v
 
+def sample_in_sphere(n, r):
+    theta = np.random.uniform(0, np.pi, n)
+    phi = np.random.uniform(-np.pi, np.pi, n)
+
+    x = r * np.sin(theta) * np.cos(phi)
+    y = r * np.sin(theta) * np.sin(phi)
+    z = r * np.cos(theta)
+
+    return np.stack([x, y, z], axis=1)
+
+
 def get_surface_laplacian(model, v, center, mean_curv):
     v = v.requires_grad_(True)
 
-    f = model(v).squeeze()
+    f_ = model(v).squeeze()
 
-    grad_f = torch.autograd.grad(f, v, torch.ones_like(f), create_graph=True, retain_graph=True)[0] # [del_f/del_x, del_f/del_y, del_f/del_z]
-    grad_grad_f = torch.autograd.grad(grad_f, v, torch.ones_like(grad_f), create_graph=True, retain_graph=True)[0] # [del^2_f/del_x^2, del^2_f/del_y^2, del^2_f/del_z^2]
-    lap_f = torch.sum(grad_grad_f, dim=1)
+    grad_f = torch.autograd.grad(f_, v, torch.ones_like(f_), create_graph=True, retain_graph=True)[0] # [del_f/del_x, del_f/del_y, del_f/del_z]
+    # lap_f = torch.zeros_like(f_)
+    # for i in range(v.shape[1]):
+    #     grad_grad_f = torch.autograd.grad(grad_f[:, i], v, torch.ones_like(grad_f[:, i]), create_graph=True, retain_graph=True)[0] # [del^2_f/del_x^2, del^2_f/del_y^2, del^2_f/del_z^2]
+    #     lap_f += grad_grad_f[:, i]
 
-    lap = torch.zeros_like(f)
-    for i in range(len(v)):
-        # J, H = compute_hessian_vector(phi, v_emb[i])
-        # J = torch.autograd.functional.jacobian(phi, v_emb[i])
-        # cross = torch.linalg.cross(J[:, 1], J[:, 2])
-        # n = cross / torch.linalg.norm(cross, 2)
-        n = v[i] - torch.Tensor(center).to(v.device)
-        n = n / torch.linalg.norm(n, 2)
+    lap = torch.zeros_like(f_)
+    center = torch.Tensor(center).to(v.device)
 
-        hessian_f = torch.autograd.functional.hessian(model, v[i])
+    n = v - center
+    n = n / torch.linalg.norm(n, dim=1, keepdim=True)  # Vectorized normalization
+    # for i in range(len(v)):
+    #     hessian_f = torch.autograd.functional.hessian(model, v[i])
+    #     lap[i] = lap_f[i] - 2*mean_curv[i]*torch.dot(grad_f[i], n[i]) - torch.dot(n[i], hessian_f @ n[i])
 
-        lap[i] = lap_f[i] - 2*mean_curv[i]*torch.dot(grad_f[i], n) - torch.dot(n, hessian_f @ n)
+
+    hessians = [torch.autograd.functional.hessian(model, v[i]) for i in range(v.shape[0])]
+    for i in range(v.shape[0]):
+        grad_f_i_surf = grad_f[i] - torch.dot(grad_f[i], n[i]) * n[i]
+        div_grad_f_i_surf = torch.autograd.grad(grad_f_i_surf, v, torch.ones_like(grad_f_i_surf), create_graph=True, retain_graph=True)[0]
+        div_grad_f_i_surf = torch.sum(div_grad_f_i_surf)
+        lap[i] = div_grad_f_i_surf - torch.dot(n[i], hessians[i] @ n[i])
 
     return lap
 
 
-def test_poisson(model, f, v_mesh, f_mesh, center, r, device, n):
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=200, verbose=True)
+def test_poisson(model, center, r, device, n):
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=100, verbose=True)
 
     for i in (pbar:= tqdm(range(10000))):
         optimizer.zero_grad()
 
-        v_mesh_rnd = gpy.random_points_on_mesh(v_mesh, f_mesh, n, return_indices=False)
+        # v_mesh_rnd = gpy.random_points_on_mesh(v_mesh, f_mesh, n, return_indices=False)
+        v_mesh_rnd = sample_in_sphere(n, r)
+
         v_mesh_rnd = torch.tensor(v_mesh_rnd, dtype=torch.float).to(device=device).requires_grad_(True)
         
-        mean_curv_rnd = torch.ones_like(v_mesh_rnd[:, 0]) * (1.0/r)
+        mean_curv_rnd = torch.ones_like(v_mesh_rnd[:, 0]) * (-2/r)
         
         laplacian_pred = get_surface_laplacian(model, v_mesh_rnd, center, mean_curv_rnd)
+        f_v = laplacian_f(v_mesh_rnd)
 
-        f_v = get_interpolated_values(f, v_mesh_rnd, v_mesh, f_mesh)
-        f_v = torch.tensor(f_v, dtype=torch.float).to(device=device).requires_grad_(True)
-
-        loss = (1/n)*torch.linalg.norm(laplacian_pred - f_v, 2)**2
+        extra_pts = v_mesh_rnd[:2]
+        loss = (1/n)*torch.linalg.norm(laplacian_pred - f_v, 2)**2 + (100)*torch.linalg.norm(model(extra_pts).squeeze() - f_torch(extra_pts), 2)**2
 
         # ps.init()
         # # ps.register_surface_mesh("mesh", )
@@ -176,19 +199,13 @@ def test_poisson(model, f, v_mesh, f_mesh, center, r, device, n):
         
         loss.backward()
         optimizer.step()
-        # scheduler.step(loss)
+        scheduler.step(loss)
 
-        # if scheduler.state_dict()["_last_lr"][0] < 1e-7:
-        #     break
+        if scheduler.state_dict()["_last_lr"][0] < 1e-7:
+            break
 
         loss_value = loss.item()
         pbar.set_description(f"Loss: {loss_value}")
-
-    val = model(torch.Tensor(v_mesh).to(device=device)).squeeze().detach().cpu().numpy()
-    # ps.init()
-    # ps.register_surface_mesh("mesh", v_mesh, f_mesh, smooth_shade=True)
-    # ps.get_surface_mesh("mesh").add_scalar_quantity("u", val)
-    # ps.show()
 
     return model
 
@@ -196,17 +213,15 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # n_layers = np.arange(3, 7, 1)
     n_layers = [5]
-    size_layer = np.arange(128, 1200, 100)
+    size_layer = 2**np.arange(6, 11, 1)
+    # size_layer = [256]
 
-    V, F = gpy.icosphere(6)
-    L = gpy.cotangent_laplacian(V, F)
-    M = gpy.massmatrix(V, F)
-    f_ = f(V[:, 0], V[:, 1], V[:, 2])
-    f_ = zero_integral_function(M, f_)
-    lap = sp.sparse.linalg.inv(M) @ L
+    center = np.array([0.0, 0.0, 0.0])
+    r = 1.0
 
-    U = sp.sparse.linalg.lsmr(lap, f_)[0]
+    V = sample_in_sphere(10000, 1.0)
 
     dof = []
     losses = []
@@ -214,28 +229,20 @@ def train():
         for j in size_layer:
             print(f"Processing model with {i} layers of {j} size")
 
-            # v_mesh, f_mesh = gpy.read_mesh(mesh_files[i])
-            v_mesh, f_mesh = gpy.icosphere(4)
-
-            center = np.mean(v_mesh, axis=0)
-            r = np.mean(np.linalg.norm(v_mesh - center, axis=1))
-
-            M_mesh = gpy.massmatrix(v_mesh, f_mesh)
-            f_ = f(v_mesh[:, 0], v_mesh[:, 1], v_mesh[:, 2])
-            f_ = zero_integral_function(M_mesh, f_)
-
-            model = MLP2(n=j, n_layers=i)
+            model = MLP(n=j, n_layers=i)
             model.to(device=device)
 
-            model = test_poisson(model, f_, v_mesh, f_mesh, center, r, device, n=100)
+            model = test_poisson(model, center, r, device, n=100)
 
-
-            l2_loss = np.linalg.norm(U - model(torch.Tensor(V).to(device=device)).squeeze().detach().cpu().numpy(), 2) * (1/V.shape[0])
+            l2_loss = np.linalg.norm(f(V) - model(torch.Tensor(V).to(device=device)).squeeze().detach().cpu().numpy(), 2) * (1/V.shape[0])
             print(l2_loss)
             losses.append(l2_loss)
             dof.append(2*i*j)
 
-            torch.save(model.state_dict(), f"poisson_results_sphere/model_{j}_{i}.pth")
+            if sys.argv[2] == "1":
+                torch.save(model.state_dict(), f"poisson_results_sphere/example1/model_{j}_{i}.pth")
+            elif sys.argv[2] == "2":
+                torch.save(model.state_dict(), f"poisson_results_sphere/example2/model_{j}_{i}.pth")
 
 def plot():
     if sys.argv[2] == "1":
@@ -245,14 +252,7 @@ def plot():
     dof = []
     losses = []
 
-    V, F = gpy.icosphere(6)
-    L = gpy.cotangent_laplacian(V, F)
-    M = gpy.massmatrix(V, F)
-    f_ = f(V[:, 0], V[:, 1], V[:, 2])
-    f_ = zero_integral_function(M, f_)
-    lap = sp.sparse.linalg.inv(M) @ L
-
-    U = sp.sparse.linalg.lsmr(lap, f_)[0]
+    V = sample_in_sphere(10000, 1.0)
 
     for file in filenames:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -260,11 +260,11 @@ def plot():
         n_layers = int(file.split("_")[-1][:-4])
         size_layer = int(file.split("_")[-2])
 
-        model = MLP2(n=size_layer, n_layers=n_layers)
+        model = MLP(n=size_layer, n_layers=n_layers)
         model.to(device=device)
         model.load_state_dict(torch.load(file, weights_only=True, map_location=device))
 
-        l2_loss = np.linalg.norm(U - model(torch.Tensor(V).to(device=device)).squeeze().detach().cpu().numpy(), 2) * (1/V.shape[0])
+        l2_loss = np.linalg.norm(f(V) - model(torch.Tensor(V).to(device=device)).squeeze().detach().cpu().numpy(), 2) * (1/V.shape[0])
         print(l2_loss, n_layers, size_layer)
         losses.append(l2_loss)
         dof.append(2*n_layers*size_layer)
@@ -274,14 +274,13 @@ def plot():
     for i in range(3, 6):
         v_mesh, f_mesh = gpy.icosphere(i)
         M_mesh = gpy.massmatrix(v_mesh, f_mesh)
-        f_ = f(v_mesh[:, 0], v_mesh[:, 1], v_mesh[:, 2])
-        f_ = zero_integral_function(M_mesh, f_)
+        f_ = f(v_mesh)
         
         l = gpy.cotangent_laplacian(v_mesh, f_mesh)
         lap_mesh = sp.sparse.linalg.inv(M_mesh) @ l
         u = sp.sparse.linalg.lsmr(lap_mesh, f_)[0]
         u_interp = get_interpolated_values(u, torch.Tensor(V), v_mesh, f_mesh)
-        l2_loss = np.linalg.norm(U - u_interp, 2) * (1/v_mesh.shape[0])
+        l2_loss = np.linalg.norm(f(V) - u_interp, 2) * (1/v_mesh.shape[0])
         fem_loss.append(l2_loss)
         fem_dof.append(v_mesh.shape[0])
 

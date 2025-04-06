@@ -107,7 +107,6 @@ def test_FEM(nx, ny):
 
 def train_second_order(dim=1, tol=1e-3, max_iter=10000, size_layer=256, n_layers=3):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(device)
 
     # Create the model
     model = MLP(n=size_layer, n_layers=n_layers, in_dim=dim)
@@ -133,8 +132,10 @@ def train_second_order(dim=1, tol=1e-3, max_iter=10000, size_layer=256, n_layers
 
         pred = model(x).squeeze()
         grad_pred = torch.autograd.grad(pred, x, torch.ones_like(pred), create_graph=True)[0]
-        laplacian_pred = torch.autograd.grad(grad_pred, x, torch.ones_like(grad_pred), create_graph=True)[0]
-        laplacian_pred = torch.sum(laplacian_pred, dim=1)
+        laplacian_pred = torch.zeros_like(pred)
+        for i in range(x.shape[1]):
+            grad_grad_pred = torch.autograd.grad(grad_pred[:, i], x, torch.ones_like(grad_pred[:, i]), create_graph=True)[0]
+            laplacian_pred += grad_grad_pred[:, i]
 
         pred_b1 = model(b1).squeeze()
         pred_b2 = model(b2).squeeze()
@@ -150,7 +151,6 @@ def train_second_order(dim=1, tol=1e-3, max_iter=10000, size_layer=256, n_layers
         optimizer.step()
         scheduler.step(loss)
 
-
         if i > 10 and scheduler._last_lr[0] < 1e-7:
             break
         else:
@@ -162,7 +162,10 @@ def train_second_order(dim=1, tol=1e-3, max_iter=10000, size_layer=256, n_layers
     plt.xlabel("Iteration")
     plt.ylabel("Loss")
     plt.title(f"dim = {dim}, order = 2, {size_layer} x {n_layers}")
-    plt.savefig(f"poisson_results/loss_{dim}dim_2order_{size_layer}_{n_layers}")
+    if sys.argv[2] == "1":
+        plt.savefig(f"poisson_results_2d/example1/loss_{size_layer}_{n_layers}.png")
+    elif sys.argv[2] == "2":
+        plt.savefig(f"poisson_results_2d/example2/loss_{size_layer}_{n_layers}.png")
 
     x = torch.tensor(np.random.uniform(-5, 5, (10000, 2))).to(device=device).float()
     true = f_2d(x[:, 0], x[:, 1]).detach().cpu().numpy()
@@ -179,7 +182,10 @@ def train_second_order(dim=1, tol=1e-3, max_iter=10000, size_layer=256, n_layers
     ax.scatter(x[:, 0], x[:, 1], true, label="True", color='blue')
     ax.scatter(x[:, 0], x[:, 1], pred, label="Predicted", color='orange')
     plt.legend()
-    plt.savefig(f"poisson_results/f_{dim}dim_2order_{size_layer}_{n_layers}")
+    if sys.argv[2] == "1":
+        plt.savefig(f"poisson_results_2d/example1/pred_{size_layer}_{n_layers}.png")
+    elif sys.argv[2] == "2":
+        plt.savefig(f"poisson_results_2d/example2/pred_{size_layer}_{n_layers}.png")
 
     l2_loss = np.linalg.norm(true - pred, 2)
 
@@ -192,10 +198,8 @@ def train_second_order(dim=1, tol=1e-3, max_iter=10000, size_layer=256, n_layers
 
 def train():
     n_layers = [5]
-    size_layer = np.arange(128, 1200, 100)
+    size_layer = 2**np.arange(5, 11, 1)
 
-    dof = []
-    losses = []
     for i in n_layers:
         for j in size_layer:
             loss = train_second_order(dim=2, max_iter=1e5, size_layer=j, n_layers=i)
