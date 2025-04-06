@@ -33,8 +33,10 @@ def f(v, const = 0.0):
 
     if sys.argv[2] == "1":
         f = r**2 * (const - 0.5*np.cos(theta))
+    elif sys.argv[2] == "2":
+        f = r**2 * (const + (1.0/6.0)*np.cos(theta)**2)
     else:
-        print("Usage: python test_autodiff_sphere.py [train|plot] 1")
+        print("Usage: python test_autodiff_sphere.py [train|plot] [1|2]")
         exit()
 
     return f
@@ -46,8 +48,10 @@ def f_torch(v, const = 0.0):
 
     if sys.argv[2] == "1":
         f = r**2 * (const - 0.5*torch.cos(theta))
+    elif sys.argv[2] == "2":
+        f = r**2 * (const + (1.0/6.0)*torch.cos(theta)**2)
     else:
-        print("Usage: python test_autodiff_sphere.py [train|plot] 1")
+        print("Usage: python test_autodiff_sphere.py [train|plot] [1|2]")
         exit()
 
     return f
@@ -59,8 +63,10 @@ def laplacian_f(v):
 
     if sys.argv[2] == "1":
         lap_f = torch.cos(theta)
+    elif sys.argv[2] == "2":
+        lap_f = torch.sin(theta)**2
     else:
-        print("Usage: python test_autodiff_sphere.py [train|plot] 1")
+        print("Usage: python test_autodiff_sphere.py [train|plot] [1|2]")
         exit()
 
     return lap_f
@@ -264,7 +270,12 @@ def plot():
         model.to(device=device)
         model.load_state_dict(torch.load(file, weights_only=True, map_location=device))
 
-        l2_loss = np.linalg.norm(f(V) - model(torch.Tensor(V).to(device=device)).squeeze().detach().cpu().numpy(), 2) * (1/V.shape[0])
+        pred = model(torch.Tensor(V).to(device=device)).squeeze().detach().cpu().numpy()
+        true = f(V)
+        const = np.mean(true - pred)
+        pred = pred + const
+
+        l2_loss = np.linalg.norm(pred - true) * (1/V.shape[0])
         print(l2_loss, n_layers, size_layer)
         losses.append(l2_loss)
         dof.append(2*n_layers*size_layer)
