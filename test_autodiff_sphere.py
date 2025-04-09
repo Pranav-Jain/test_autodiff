@@ -2,13 +2,10 @@ import numpy as np
 import scipy as sp
 import matplotlib.pyplot as plt
 import polyscope as ps
-import ot
-from scipy.spatial import KDTree
 import gpytoolbox as gpy
 import torch
 from tqdm import tqdm
 import glob
-import pyvista as pv
 import sys
 import os
 
@@ -27,14 +24,12 @@ def get_spherical_coordinates_torch(v, c):
     return torch.stack([r, theta, phi], dim=1)
 
 def f(v, const = 0.0):
-    c = np.mean(v, axis=0)
-    coords = get_spherical_coordinates(v, c)
-    r, theta, phi = coords[:, 0], coords[:, 1], coords[:, 2]
+    r, theta, phi = v[:, 0], v[:, 1], v[:, 2]
 
     if sys.argv[2] == "1":
         f = r**2 * (const - 0.5*np.cos(theta))
     elif sys.argv[2] == "2":
-        f = r**2 * (const + (1.0/6.0)*np.cos(theta)**2)
+        f = r**2 * (const - 0.5*np.sin(theta)*np.cos(phi))
     else:
         print("Usage: python test_autodiff_sphere.py [train|plot] [1|2]")
         exit()
@@ -42,14 +37,12 @@ def f(v, const = 0.0):
     return f
 
 def f_torch(v, const = 0.0):
-    c = torch.mean(v, dim=0)
-    coords = get_spherical_coordinates_torch(v, c)
-    r, theta, phi = coords[:, 0], coords[:, 1], coords[:, 2]
+    r, theta, phi = v[:, 0], v[:, 1], v[:, 2]
 
     if sys.argv[2] == "1":
         f = r**2 * (const - 0.5*torch.cos(theta))
     elif sys.argv[2] == "2":
-        f = r**2 * (const + (1.0/6.0)*torch.cos(theta)**2)
+        f = r**2 * (const - 0.5*torch.sin(theta)*torch.cos(phi))
     else:
         print("Usage: python test_autodiff_sphere.py [train|plot] [1|2]")
         exit()
@@ -57,14 +50,12 @@ def f_torch(v, const = 0.0):
     return f
 
 def laplacian_f(v):
-    c = torch.mean(v, dim=0)
-    coords = get_spherical_coordinates_torch(v, c)
-    r, theta, phi = coords[:, 0], coords[:, 1], coords[:, 2]
+    r, theta, phi = v[:, 0], v[:, 1], v[:, 2]
 
     if sys.argv[2] == "1":
         lap_f = torch.cos(theta)
     elif sys.argv[2] == "2":
-        lap_f = torch.sin(theta)**2
+        lap_f = torch.sin(theta)*torch.cos(phi)
     else:
         print("Usage: python test_autodiff_sphere.py [train|plot] [1|2]")
         exit()
@@ -134,66 +125,69 @@ def get_interpolated_values(f, v, v_mesh, f_mesh):
     return f_v
 
 def sample_in_sphere(n, r):
-    theta = np.random.uniform(0, np.pi, n)
-    phi = np.random.uniform(-np.pi, np.pi, n)
-
-    x = r * np.sin(theta) * np.cos(phi)
-    y = r * np.sin(theta) * np.sin(phi)
-    z = r * np.cos(theta)
-
-    return np.stack([x, y, z], axis=1)
+    # Sample uniformly on the unit sphere
+    vec = np.random.uniform(-1, 1, (n, 3))
+    vec = vec / np.linalg.norm(vec, axis=1, keepdims=True)  # Normalize to unit length
+    vec = vec * r  # Scale to radius r
+    return vec
 
 
-def get_surface_laplacian(model, v, center, mean_curv):
+def get_surface_laplacian(model, v, center):
     v = v.requires_grad_(True)
 
     f_ = model(v).squeeze()
 
     grad_f = torch.autograd.grad(f_, v, torch.ones_like(f_), create_graph=True, retain_graph=True)[0] # [del_f/del_x, del_f/del_y, del_f/del_z]
-    # lap_f = torch.zeros_like(f_)
-    # for i in range(v.shape[1]):
-    #     grad_grad_f = torch.autograd.grad(grad_f[:, i], v, torch.ones_like(grad_f[:, i]), create_graph=True, retain_graph=True)[0] # [del^2_f/del_x^2, del^2_f/del_y^2, del^2_f/del_z^2]
-    #     lap_f += grad_grad_f[:, i]
 
     lap = torch.zeros_like(f_)
     center = torch.Tensor(center).to(v.device)
 
     n = v - center
     n = n / torch.linalg.norm(n, dim=1, keepdim=True)  # Vectorized normalization
-    # for i in range(len(v)):
-    #     hessian_f = torch.autograd.functional.hessian(model, v[i])
-    #     lap[i] = lap_f[i] - 2*mean_curv[i]*torch.dot(grad_f[i], n[i]) - torch.dot(n[i], hessian_f @ n[i])
 
-
-    hessians = [torch.autograd.functional.hessian(model, v[i]) for i in range(v.shape[0])]
-    for i in range(v.shape[0]):
-        grad_f_i_surf = grad_f[i] - torch.dot(grad_f[i], n[i]) * n[i]
-        div_grad_f_i_surf = torch.autograd.grad(grad_f_i_surf, v, torch.ones_like(grad_f_i_surf), create_graph=True, retain_graph=True)[0]
-        div_grad_f_i_surf = torch.sum(div_grad_f_i_surf)
-        lap[i] = div_grad_f_i_surf - torch.dot(n[i], hessians[i] @ n[i])
-
+    hessians = torch.func.vmap(torch.func.hessian(model))(v)[:, 0] # Batched Hessian
+    grad_f_surf = grad_f - torch.sum(grad_f * n, dim=1, keepdim=True) * n
+    div_grad_f_surf = torch.autograd.grad(grad_f_surf, v, torch.ones_like(grad_f_surf), create_graph=True, retain_graph=True)[0]
+    div_grad_f_surf = torch.sum(div_grad_f_surf, dim=1)
+    
+    hessian_dot_n = torch.bmm(hessians, n.unsqueeze(-1))  # Batched matrix-vector multiplication
+    hessian_dot_n = hessian_dot_n.squeeze(-1)  # Remove the last singleton dimension
+    lap = div_grad_f_surf - torch.sum(n * hessian_dot_n, dim=1)
+    
     return lap
 
 
 def test_poisson(model, center, r, device, n):
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=100, verbose=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=200, verbose=True)
 
     for i in (pbar:= tqdm(range(10000))):
         optimizer.zero_grad()
 
         # v_mesh_rnd = gpy.random_points_on_mesh(v_mesh, f_mesh, n, return_indices=False)
         v_mesh_rnd = sample_in_sphere(n, r)
+        v_mesh_rnd = get_spherical_coordinates(v_mesh_rnd, center)
 
         v_mesh_rnd = torch.tensor(v_mesh_rnd, dtype=torch.float).to(device=device).requires_grad_(True)
         
-        mean_curv_rnd = torch.ones_like(v_mesh_rnd[:, 0]) * (-2/r)
-        
-        laplacian_pred = get_surface_laplacian(model, v_mesh_rnd, center, mean_curv_rnd)
+        laplacian_pred = get_surface_laplacian(model, v_mesh_rnd, center)
         f_v = laplacian_f(v_mesh_rnd)
 
-        extra_pts = v_mesh_rnd[:2]
-        loss = (1/n)*torch.linalg.norm(laplacian_pred - f_v, 2)**2 + (100)*torch.linalg.norm(model(extra_pts).squeeze() - f_torch(extra_pts), 2)**2
+        ## Loss with extra points ##
+        if len(sys.argv) > 3 and sys.argv[3] == "exactvalue":
+            extra_pts = v_mesh_rnd[:2]
+            loss = (1/n)*torch.linalg.norm(laplacian_pred - f_v, 2)**2 + (100)*torch.linalg.norm(model(extra_pts).squeeze() - f_torch(extra_pts), 2)**2
+
+        ## Loss st the function integrates to zero ##
+        elif len(sys.argv) > 3 and sys.argv[3] == "zerointegral":
+            extra_pts = sample_in_sphere(10000, r)
+            extra_pts = get_spherical_coordinates(extra_pts, center)
+            extra_pts = torch.tensor(extra_pts, dtype=torch.float).to(device=device).requires_grad_(True)
+            loss = (1/n)*torch.linalg.norm(laplacian_pred - f_v, 2)**2 + (100)*torch.sum(model(extra_pts).squeeze())**2
+
+        else:
+            loss = (1/n)*torch.linalg.norm(laplacian_pred - f_v, 2)**2
+
 
         # ps.init()
         # # ps.register_surface_mesh("mesh", )
@@ -205,10 +199,10 @@ def test_poisson(model, center, r, device, n):
         
         loss.backward()
         optimizer.step()
-        scheduler.step(loss)
+        # scheduler.step(loss)
 
-        if scheduler.state_dict()["_last_lr"][0] < 1e-7:
-            break
+        # if scheduler.state_dict()["_last_lr"][0] < 1e-7:
+        #     break
 
         loss_value = loss.item()
         pbar.set_description(f"Loss: {loss_value}")
@@ -228,6 +222,7 @@ def train():
     r = 1.0
 
     V = sample_in_sphere(10000, 1.0)
+    V = get_spherical_coordinates(V, center)
 
     dof = []
     losses = []
@@ -238,27 +233,44 @@ def train():
             model = MLP(n=j, n_layers=i)
             model.to(device=device)
 
-            model = test_poisson(model, center, r, device, n=100)
+            model = test_poisson(model, center, r, device, n=1000)
 
             l2_loss = np.linalg.norm(f(V) - model(torch.Tensor(V).to(device=device)).squeeze().detach().cpu().numpy(), 2) * (1/V.shape[0])
             print(l2_loss)
             losses.append(l2_loss)
             dof.append(2*i*j)
 
-            if sys.argv[2] == "1":
-                torch.save(model.state_dict(), f"poisson_results_sphere/example1/model_{j}_{i}.pth")
-            elif sys.argv[2] == "2":
-                torch.save(model.state_dict(), f"poisson_results_sphere/example2/model_{j}_{i}.pth")
+            if len(sys.argv) > 3:
+                if sys.argv[2] == "1":
+                    torch.save(model.state_dict(), f"poisson_results_sphere_{sys.argv[3]}/example1/model_{j}_{i}.pth")
+                elif sys.argv[2] == "2":
+                    torch.save(model.state_dict(), f"poisson_results_sphere_{sys.argv[3]}/example2/model_{j}_{i}.pth")
+            else:
+                if sys.argv[2] == "1":
+                    torch.save(model.state_dict(), f"poisson_results_sphere/example1/model_{j}_{i}.pth")
+                elif sys.argv[2] == "2":
+                    torch.save(model.state_dict(), f"poisson_results_sphere/example2/model_{j}_{i}.pth")
 
 def plot():
-    if sys.argv[2] == "1":
-        filenames = glob.glob("poisson_results_sphere/example1/*.pth")
-    elif sys.argv[2] == "2":
-        filenames = glob.glob("poisson_results_sphere/example2/*.pth")
+    if len(sys.argv) > 3:
+        if sys.argv[2] == "1":
+            filenames = glob.glob(f"poisson_results_sphere_{sys.argv[3]}/example1/*.pth")
+        elif sys.argv[2] == "2":
+            filenames = glob.glob(f"poisson_results_sphere_{sys.argv[3]}/example2/*.pth")
+    else:
+        if sys.argv[2] == "1":
+            filenames = glob.glob("poisson_results_sphere/example1/*.pth")
+        elif sys.argv[2] == "2":
+            filenames = glob.glob("poisson_results_sphere/example2/*.pth")
+        else:
+            print("Usage: python test_autodiff_sphere.py [train|plot] [1|2] [|exactvalue|zerointegral]")
+            exit()
     dof = []
     losses = []
 
     V = sample_in_sphere(10000, 1.0)
+    center = np.mean(V, axis=0)
+    V = get_spherical_coordinates(V, center)
 
     for file in filenames:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -314,11 +326,26 @@ def plot():
     plt.title("L2 Loss vs DOF for Poisson Equation on Sphere")
     plt.legend()
     # plt.show()
-    plt.savefig("convergence.png")
+    if len(sys.argv) > 3:
+        plt.savefig(f"convergence_example_{sys.argv[2]}_{sys.argv[3]}.png")
+    else:
+        plt.savefig(f"convergence_example_{sys.argv[2]}.png")
 
 if __name__ == "__main__":
 
-    if len(sys.argv) > 2:
+    if len(sys.argv) > 3 and (sys.argv[3] == "exactvalue" or sys.argv[3] == "zerointegral"):
+        if sys.argv[1] == "train":
+            # If directory doesn't exist, create it
+            if sys.argv[2] == "1":
+                if not os.path.exists(f"poisson_results_sphere_{sys.argv[3]}/example1"):
+                    os.makedirs(f"poisson_results_sphere_{sys.argv[3]}/example1")
+            elif sys.argv[2] == "2":
+                if not os.path.exists(f"poisson_results_sphere_{sys.argv[3]}/example2"):
+                    os.makedirs(f"poisson_results_sphere_{sys.argv[3]}/example2")
+            train()
+        elif sys.argv[1] == "plot":
+            plot()
+    elif len(sys.argv) == 3:
         if sys.argv[1] == "train":
             # If directory doesn't exist, create it
             if sys.argv[2] == "1":
