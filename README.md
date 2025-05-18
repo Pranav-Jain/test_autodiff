@@ -1,5 +1,5 @@
 # Testing autodiff for solving the Poisson equation
-The code in this repository is used to test the autodiff package for solving the Poisson equation ($\Delta u = f$) on arbitrary surfaces. We use an MLP to approximate the function $u$ and the loss function is $\|\Delta u_{MLP} - f\|$.
+The code in this repository is used to test the autodiff package for solving the Poisson equation ($\Delta u = f$) on arbitrary surfaces. We use an MLP to approximate the function $u$ and the loss function is $\|\Delta u_{MLP} - f\|^2$.
 The experiments are set up to check if one observes a convergence pattern as the number of degrees of freedom (tunable weights of the MLP) are increased.
 
 ## Experiments
