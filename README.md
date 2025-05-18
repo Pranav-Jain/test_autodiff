@@ -26,3 +26,4 @@ python3 plot_all.py [1 | 2]
 ## Pretrained models
 We test using two different functions each in 2D and on the sphere. The pretrained models are stored in the corresponding directories. The models are trained using the `train` command.
 The directory also contains the convergence plots using the `plot` command on the trained models.
+
